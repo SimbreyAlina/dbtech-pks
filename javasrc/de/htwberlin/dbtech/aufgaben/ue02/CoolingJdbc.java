@@ -1,6 +1,10 @@
 package de.htwberlin.dbtech.aufgaben.ue02;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.LinkedList;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -28,9 +32,21 @@ public class CoolingJdbc implements ICoolingJdbc {
 
     @Override
     public List<String> getSampleKinds() {
-        L.info("getSampleKinds: start");
-        // TODO Auto-generated method stub
-        return null;
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
+        List<String> sampleKind = null;
+        try {
+            String sql = "Select text from Samplekind order by text asc";
+            sampleKind = new LinkedList<String>();
+            pStmt = useConnection().prepareStatement(sql);
+            rs = pStmt.executeQuery();
+            while (rs.next()) {
+                sampleKind.add(rs.getString("text"));
+            }
+        } catch (SQLException e) {
+            throw new DataException(e);
+        }
+        return sampleKind;
     }
 
     @Override
