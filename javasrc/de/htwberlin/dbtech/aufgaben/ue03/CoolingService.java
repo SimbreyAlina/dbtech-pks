@@ -5,9 +5,9 @@ import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-
 import de.htwberlin.dbtech.exceptions.CoolingSystemException;
 import de.htwberlin.dbtech.exceptions.DataException;
+
 
 public class CoolingService implements ICoolingService {
 
@@ -28,58 +28,68 @@ public class CoolingService implements ICoolingService {
     @Override
     public void transferSample(Integer sampleId, Integer diameterInCM) {
 
-        // SCHRITT 1: Existiert die Probe?
+        // Gibt es die Probe in der DB?
         if (!isSampleIdExisting(sampleId)) {
             throw new CoolingSystemException("Probe existiert nicht: " + sampleId);
         }
 
-        // SCHRITT 2: Gibt es überhaupt ein Tablett mit passendem Durchmesser?
+        // Gibt es ueberhaupt ein Tablett mit passendem Durchmesser?
         if (!isTrayWithDiameterExisting(diameterInCM)) {
             throw new CoolingSystemException("Kein Tablett mit Durchmesser: " + diameterInCM);
         }
 
-        // SCHRITT 3: Gibt es ein Tablett mit freien Plätzen und passendem Durchmesser?
+        // Gibt es ein Tablett mit passendem Durchmesser und freiem Platz?
         if (!isTrayWithFreeSpaceExisting(diameterInCM)) {
             throw new CoolingSystemException("Alle Tabletts mit Durchmesser " + diameterInCM + " sind voll");
         }
 
-        // Ab hier: Es gibt mindestens ein Tablett mit freiem Platz
         Date sampleExpiration = getSampleExpirationDate(sampleId);
 
-        // SCHRITT 4: Ist das Ablaufdatum für ein passendes Tablett bereits gesetzt?
-        //            d.h. gibt es ein nicht-leeres Tablett, dessen ExpirationDate > sampleExpiration?
+        // Gibt es ein bereits genutztes Tablett mit freiem Platz, dessen
+        // Ablaufdatum groesser als das der Probe ist?
         Integer trayId = findNonEmptyTrayWithFreeSpace(diameterInCM, sampleExpiration);
 
         if (trayId != null) {
-            // JA: Probe auf kleinsten freien Platz des Tabletts setzen
+            // Probe auf kleinsten freien Platz des Tabletts setzen
             int placeNo = findSmallestFreePlaceNo(trayId);
             insertPlace(trayId, placeNo, sampleId);
         } else {
-            // NEIN: Leeres Tablett (EXPIRATIONDATE IS NULL) nehmen
+            // Kein passendes Tablett vorhanden -> leeres Tablett verwenden
             Integer emptyTrayId = findEmptyTrayWithFreeSpace(diameterInCM);
             if (emptyTrayId == null) {
                 throw new CoolingSystemException("Kein leeres Tablett mit Durchmesser: " + diameterInCM);
             }
-            // Ablaufdatum setzen: Ablaufdatum Probe + 30 Tage (Berechnung in Oracle, kein Zeitzonenproblem)
+            // Ablaufdatum des Tabletts = Ablaufdatum der Probe + 30 Tage
             setTrayExpirationDate(emptyTrayId, sampleExpiration);
-            // Probe auf Platz 1 setzen (Tablett war leer)
+            // Tablett war leer -> Probe auf Platz 1
             insertPlace(emptyTrayId, 1, sampleId);
         }
     }
 
-
-    // SCHRITT 1: Probe prüfen
-
-
     /**
-     * Prüft ob eine Probe mit der gegebenen ID in der DB existiert.
-     */
+     * prueft, ob die Probe in der DB existiert
+     *
+     * @param sampleId
+     *            - der Primaerschluessel der Probe
+     * @return true - Probe existiert | false - Probe existiert nicht
+     *
+     * @author pdohmeie
+     * **/
     public boolean isSampleIdExisting(Integer sampleId) {
-        String sql = "SELECT COUNT(SAMPLEID) AS ANZAHL FROM Sample WHERE SAMPLEID = ?";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, sampleId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() && rs.getInt("ANZAHL") > 0;
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
+        String sql = "Select count(SAMPLEID) as ANZAHL from Sample where SAMPLEID = ?";
+        try {
+
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, sampleId);
+            rs = pStmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt("ANZAHL") > 0;
+            } else {
+
+                return false;
             }
         } catch (SQLException e) {
             throw new DataException(e);
@@ -87,16 +97,24 @@ public class CoolingService implements ICoolingService {
     }
 
     /**
-     * Liefert das Ablaufdatum der Probe.
+     * liefert das Ablaufdatum der Probe
+     *
+     * @param sampleId
+     *            - der Primaerschluessel der Probe
+     * @return das Ablaufdatum der Probe
      */
     private Date getSampleExpirationDate(Integer sampleId) {
-        String sql = "SELECT EXPIRATIONDATE FROM Sample WHERE SAMPLEID = ?";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, sampleId);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getDate("EXPIRATIONDATE");
-                }
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
+        String sql = "Select EXPIRATIONDATE from Sample where SAMPLEID = ?";
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, sampleId);
+            rs = pStmt.executeQuery();
+            if (rs.next()) {
+                return rs.getDate("EXPIRATIONDATE");
+            } else {
                 throw new CoolingSystemException("Kein Ablaufdatum fuer Probe: " + sampleId);
             }
         } catch (SQLException e) {
@@ -104,53 +122,97 @@ public class CoolingService implements ICoolingService {
         }
     }
 
-    // SCHRITT 2: Gibt es überhaupt ein Tablett mit passendem Durchmesser?
-
-
+    /**
+     * prueft, ob ein Tablett mit dem angegebenen Durchmesser existiert
+     *
+     * @param diameterInCM
+     *            - der gesuchte Durchmesser
+     * @return true - Tablett existiert | false - Tablett existiert nicht
+     */
     private boolean isTrayWithDiameterExisting(Integer diameterInCM) {
-        String sql = "SELECT COUNT(*) AS ANZAHL FROM Tray WHERE DIAMETERINCM = ?";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, diameterInCM);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() && rs.getInt("ANZAHL") > 0;
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
+        String sql = "Select count(*) as ANZAHL from Tray where DIAMETERINCM = ?";
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, diameterInCM);
+            rs = pStmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt("ANZAHL") > 0;
+            } else {
+                return false;
             }
         } catch (SQLException e) {
             throw new DataException(e);
         }
     }
-
-
-    // SCHRITT 3: Gibt es ein Tablett mit freien Plätzen?
-
-
-    private boolean isTrayWithFreeSpaceExisting(Integer diameterInCM) {
-        String sql =
-                "SELECT COUNT(*) AS ANZAHL FROM Tray t " +
-                        "WHERE t.DIAMETERINCM = ? " +
-                        "  AND (SELECT COUNT(*) FROM Place p WHERE p.TRAYID = t.TRAYID) < t.CAPACITY";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, diameterInCM);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() && rs.getInt("ANZAHL") > 0;
-            }
-        } catch (SQLException e) {
-            throw new DataException(e);
-        }
-    }
-
-
-    // SCHRITT 4a: Nicht-leeres Tablett mit freiem Platz und passendem Ablaufdatum
-
 
     /**
-     * Sucht das Tablett mit:
-     *   - passendem Durchmesser
-     *   - EXPIRATIONDATE bereits gesetzt (nicht NULL)
-     *   - EXPIRATIONDATE > Ablaufdatum der Probe
-     *   - noch freien Plätzen
-     * Nimmt das Tablett mit dem KLEINSTEN solchen Ablaufdatum.
+     * prueft, ob ein Tablett mit dem angegebenen Durchmesser existiert, das
+     * noch einen freien Platz hat.
+     *
+     * Query vom Prof: zaehlt pro Tablett (RIGHT JOIN, damit auch leere
+     * Tabletts mit anzahl_proben = 0 erfasst werden) die belegten Plaetze
+     * und filtert auf Tabletts, bei denen capacity - anzahl_proben > 0 ist.
+     *
+     * @param diameterInCM
+     *            - der gesuchte Durchmesser
+     * @return true - es gibt ein Tablett mit freiem Platz | false - alle
+     *         passenden Tabletts sind voll
+     */
+    private boolean isTrayWithFreeSpaceExisting(Integer diameterInCM) {
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
+        String sql =
+                "SELECT " +
+                        "    capacity - anzahl_proben AS anzahl_freie_plaetze " +
+                        "FROM ( " +
+                        "    SELECT " +
+                        "        COUNT(p.sampleid) AS anzahl_proben, " +
+                        "        t.trayid, " +
+                        "        t.capacity, " +
+                        "        t.expirationdate " +
+                        "    FROM " +
+                        "        place p " +
+                        "        RIGHT JOIN tray t ON p.trayid = t.trayid " +
+                        "    WHERE " +
+                        "        t.diameterincm = ? " +
+                        "    GROUP BY " +
+                        "        t.trayid, " +
+                        "        t.capacity, " +
+                        "        t.expirationdate " +
+                        ") " +
+                        "WHERE " +
+                        "    capacity - anzahl_proben > 0";
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, diameterInCM);
+            rs = pStmt.executeQuery();
+            return rs.next();
+        } catch (SQLException e) {
+            throw new DataException(e);
+        }
+    }
+
+    /**
+     * sucht ein bereits genutztes Tablett (EXPIRATIONDATE gesetzt) mit
+     * passendem Durchmesser, freiem Platz und einem Ablaufdatum, das groesser
+     * als das Ablaufdatum der Probe ist. Es wird das Tablett mit dem
+     * kleinsten passenden Ablaufdatum gewaehlt.
+     *
+     * @param diameterInCM
+     *            - der gesuchte Durchmesser
+     * @param sampleExpiration
+     *            - das Ablaufdatum der Probe
+     * @return die TrayId des gefundenen Tabletts oder null, falls keines
+     *         passt
      */
     private Integer findNonEmptyTrayWithFreeSpace(Integer diameterInCM, Date sampleExpiration) {
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
         String sql =
                 "SELECT t.TRAYID FROM Tray t " +
                         "WHERE t.DIAMETERINCM = ? " +
@@ -159,11 +221,14 @@ public class CoolingService implements ICoolingService {
                         "  AND (SELECT COUNT(*) FROM Place p WHERE p.TRAYID = t.TRAYID) < t.CAPACITY " +
                         "ORDER BY t.EXPIRATIONDATE ASC " +
                         "FETCH FIRST 1 ROWS ONLY";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, diameterInCM);
-            ps.setDate(2, sampleExpiration);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) return rs.getInt("TRAYID");
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, diameterInCM);
+            pStmt.setDate(2, sampleExpiration);
+            rs = pStmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt("TRAYID");
+            } else {
                 return null;
             }
         } catch (SQLException e) {
@@ -171,13 +236,19 @@ public class CoolingService implements ICoolingService {
         }
     }
 
-    // SCHRITT 4b: Leeres Tablett (EXPIRATIONDATE IS NULL)
-
-
     /**
-     * Sucht ein leeres Tablett (EXPIRATIONDATE IS NULL, keine Places) mit passendem Durchmesser.
+     * sucht ein leeres Tablett (EXPIRATIONDATE IS NULL, keine Places) mit
+     * passendem Durchmesser.
+     *
+     * @param diameterInCM
+     *            - der gesuchte Durchmesser
+     * @return die TrayId des gefundenen leeren Tabletts oder null, falls
+     *         keines existiert
      */
     private Integer findEmptyTrayWithFreeSpace(Integer diameterInCM) {
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
         String sql =
                 "SELECT TRAYID FROM Tray " +
                         "WHERE DIAMETERINCM = ? " +
@@ -185,10 +256,13 @@ public class CoolingService implements ICoolingService {
                         "  AND (SELECT COUNT(*) FROM Place p WHERE p.TRAYID = Tray.TRAYID) = 0 " +
                         "ORDER BY TRAYID ASC " +
                         "FETCH FIRST 1 ROWS ONLY";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, diameterInCM);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) return rs.getInt("TRAYID");
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, diameterInCM);
+            rs = pStmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt("TRAYID");
+            } else {
                 return null;
             }
         } catch (SQLException e) {
@@ -197,59 +271,83 @@ public class CoolingService implements ICoolingService {
     }
 
     /**
-     * Setzt das Ablaufdatum des Tabletts auf Probe-Ablaufdatum + 30 Tage.
-     * Addition in Oracle SQL → kein Java-Zeitzonenproblem.
+     * setzt das Ablaufdatum des Tabletts auf das Ablaufdatum der Probe plus
+     * 30 Tage. Die Addition erfolgt in Oracle SQL, damit es kein
+     * Java-Zeitzonenproblem gibt.
+     *
+     * @param trayId
+     *            - der Primaerschluessel des Tabletts
+     * @param sampleExpiration
+     *            - das Ablaufdatum der Probe
      */
     private void setTrayExpirationDate(Integer trayId, Date sampleExpiration) {
+
+        PreparedStatement pStmt = null;
         String sql = "UPDATE Tray SET EXPIRATIONDATE = TRUNC(? + 30) WHERE TRAYID = ?";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setDate(1, sampleExpiration);
-            ps.setInt(2, trayId);
-            ps.executeUpdate();
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setDate(1, sampleExpiration);
+            pStmt.setInt(2, trayId);
+            pStmt.executeUpdate();
         } catch (SQLException e) {
             throw new DataException(e);
         }
     }
 
-    // HILFSMETHODEN: Platz finden und einfügen
-
-
     /**
-     * Findet den kleinsten freien PlaceNo auf einem Tablett.
-     * Lücken werden gefüllt: z.B. belegt: 1,2,4 → gibt 3 zurück.
+     * findet den kleinsten freien Platz (PlaceNo) auf einem Tablett. Luecken
+     * werden gefuellt, z.B. belegt: 1,2,4 -> Ergebnis 3.
+     *
+     * @param trayId
+     *            - der Primaerschluessel des Tabletts
+     * @return die kleinste freie PlaceNo
      */
     private int findSmallestFreePlaceNo(Integer trayId) {
+
+        PreparedStatement pStmt = null;
+        ResultSet rs = null;
         String sql = "SELECT PLACENO FROM Place WHERE TRAYID = ? ORDER BY PLACENO ASC";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, trayId);
-            try (ResultSet rs = ps.executeQuery()) {
-                int expected = 1;
-                while (rs.next()) {
-                    int current = rs.getInt("PLACENO");
-                    if (current != expected) {
-                        return expected; // Lücke gefunden
-                    }
-                    expected++;
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, trayId);
+            rs = pStmt.executeQuery();
+            int expected = 1;
+            while (rs.next()) {
+                int current = rs.getInt("PLACENO");
+                if (current != expected) {
+                    return expected; // Luecke gefunden
                 }
-                return expected; // nächste freie Stelle am Ende
+                expected++;
             }
+            return expected; // naechste freie Stelle am Ende
         } catch (SQLException e) {
             throw new DataException(e);
         }
     }
 
     /**
-     * Fügt einen neuen Place-Datensatz ein.
+     * fuegt einen neuen Place-Datensatz ein.
+     *
+     * @param trayId
+     *            - der Primaerschluessel des Tabletts
+     * @param placeNo
+     *            - die Platznummer auf dem Tablett
+     * @param sampleId
+     *            - der Primaerschluessel der Probe
      */
     private void insertPlace(Integer trayId, int placeNo, Integer sampleId) {
+
+        PreparedStatement pStmt = null;
         String sql = "INSERT INTO Place (TRAYID, PLACENO, SAMPLEID) VALUES (?, ?, ?)";
-        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
-            ps.setInt(1, trayId);
-            ps.setInt(2, placeNo);
-            ps.setInt(3, sampleId);
-            ps.executeUpdate();
+        try {
+            pStmt = useConnection().prepareStatement(sql);
+            pStmt.setInt(1, trayId);
+            pStmt.setInt(2, placeNo);
+            pStmt.setInt(3, sampleId);
+            pStmt.executeUpdate();
         } catch (SQLException e) {
             throw new DataException(e);
         }
     }
+
 }
